@@ -1,253 +1,232 @@
-<# :
 @echo off
-chcp 65001 > nul
-title Управление устройствами usbipd
+chcp 65001 >nul
+setlocal
 
+:: Получаем путь к папке скрипта без завершающего слеша (исправляет ошибку 0x8007010b в wt.exe)
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+
+:: Проверка прав администратора и запуск в Windows Terminal
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-    set "SCRIPT_PATH=%~f0"
-    powershell -NoProfile -Command "if (Get-Command wt -ErrorAction SilentlyContinue) { Start-Process wt -Verb RunAs -ArgumentList @('cmd', '/c', ('\"{0}\"' -f $env:SCRIPT_PATH)) } else { Start-Process -FilePath $env:SCRIPT_PATH -Verb RunAs }"
+    where wt.exe >nul 2>&1
+    if %errorlevel% equ 0 (
+        powershell -NoProfile -Command "Start-Process wt.exe -ArgumentList '-d', '\"%SCRIPT_DIR%\"', 'cmd', '/c', '\"\"%~f0\"\"' -Verb RunAs"
+    ) else (
+        powershell -NoProfile -Command "Start-Process cmd.exe -ArgumentList '/c', '\"\"%~f0\"\"' -Verb RunAs"
+    )
     exit /b
 )
 
-set "SCRIPT_PATH=%~f0"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$b=[IO.File]::ReadAllBytes($env:SCRIPT_PATH);try{$c=(New-Object Text.UTF8Encoding $false,$true).GetString($b)}catch{$c=[Text.Encoding]::GetEncoding(1251).GetString($b)};Invoke-Expression $c.TrimStart([char]0xFEFF)"
-if %errorlevel% neq 0 (
-    echo.
-    pause
-)
-exit /b
-#>
-
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
-if (-not (Get-Command "usbipd" -ErrorAction SilentlyContinue)) {
-    Write-Host "[Ошибка] Утилита usbipd не найдена в PATH." -ForegroundColor Red
-    exit 1
-}
-
-function Get-UsbipdDevices {
-    $raw = cmd /c "chcp 65001 > nul && usbipd list"
-    $list = @()
-    foreach ($line in $raw) {
-        if ($line -match '^\s*(\d+-[\d\.]+)\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s+(.+?)\s+(Not shared|Shared|Attached.*)$') {
-            $list += [PSCustomObject]@{
-                BusId  = $matches[1]
-                VidPid = $matches[2]
-                Name   = $matches[3].Trim()
-                State  = $matches[4].Trim()
-            }
-        }
-    }
-    return $list
-}
-
-function Select-DevicesFromList {
-    param(
-        [array]$DeviceList,
-        [string]$PromptText
+:: Перезапуск в Windows Terminal, если скрипт открыт в обычном conhost
+if not defined WT_SESSION (
+    where wt.exe >nul 2>&1
+    if %errorlevel% equ 0 (
+        start "" wt.exe -d "%SCRIPT_DIR%" cmd /c ""%~f0""
+        exit /b
     )
+)
 
-    for ($i = 0; $i -lt $DeviceList.Count; $i++) {
-        $dev = $DeviceList[$i]
-        Write-Host ("  {0}. [{1}] {2} ({3}) - {4}" -f ($i + 1), $dev.BusId, $dev.Name, $dev.VidPid, $dev.State)
-    }
+:: Запуск интерактивного интерфейса на PowerShell (UTF-8 + цвета + рамки)
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$raw = Get-Content -LiteralPath '%~f0' -Raw -Encoding UTF8; $parts = [regex]::Split($raw, '(?m)^#__PS_BLOCK__\r?$'); Invoke-Expression $parts[1]"
+if %errorlevel% neq 0 pause
+exit /b
 
-    Write-Host ""
-    $selection = Read-Host $PromptText
+#__PS_BLOCK__
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    [Console]::InputEncoding  = [System.Text.Encoding]::UTF8
 
-    if ([string]::IsNullOrWhiteSpace($selection)) {
-        return @()
-    }
+    function Get-ConnectedUsbDevices {
+        $raw = usbipd list 2>$null
+        $devices = @()
+        $inConnected = $false
 
-    $tokens = $selection -split '[\s,;]+' | Where-Object { $_ -ne '' }
-    $selectedIndices = New-Object System.Collections.Generic.HashSet[int]
-
-    foreach ($token in $tokens) {
-        if ($token -match '^\d+$') {
-            $idx = [int]$token - 1
-            if ($idx -ge 0 -and $idx -lt $DeviceList.Count) {
-                [void]$selectedIndices.Add($idx)
+        foreach ($line in $raw) {
+            if ($line -match '^\s*Connected:') {
+                $inConnected = $true
+                continue
             }
-            else {
-                Write-Host "[Предупреждение] Номер '$token' вне диапазона и будет пропущен." -ForegroundColor Yellow
+            if ($line -match '^\s*Persisted:') {
+                $inConnected = $false
+                continue
             }
-        }
-        else {
-            Write-Host "[Предупреждение] Некорректный ввод '$token' пропущен." -ForegroundColor Yellow
-        }
-    }
-
-    $result = @()
-    foreach ($idx in ($selectedIndices | Sort-Object)) {
-        $result += $DeviceList[$idx]
-    }
-    return $result
-}
-
-function Invoke-UnbindDevices {
-    param([array]$DevicesToUnbind)
-
-    Write-Host ""
-    $successList = @()
-    $failedList  = @()
-
-    foreach ($dev in $DevicesToUnbind) {
-        Write-Host "Отключение [$($dev.BusId)] $($dev.Name)..." -NoNewline
-        $cmdOut = usbipd unbind --busid $dev.BusId 2>&1
-        Start-Sleep -Milliseconds 400
-        $newState = (Get-UsbipdDevices | Where-Object { $_.BusId -eq $dev.BusId }).State
-
-        if ($newState -eq "Not shared") {
-            Write-Host " OK" -ForegroundColor Green
-            $successList += $dev
-        }
-        else {
-            Write-Host " ОШИБКА (статус: $newState)" -ForegroundColor Red
-            if ($cmdOut) { Write-Host "   Детали: $cmdOut" -ForegroundColor DarkRed }
-            $failedList += $dev
-        }
-    }
-
-    Write-Host "`n--- Итог операции ---" -ForegroundColor Cyan
-    if ($successList.Count -gt 0) {
-        Write-Host "Отключены устройства:" -ForegroundColor Green
-        foreach ($dev in $successList) {
-            Write-Host "  * [$($dev.BusId)] $($dev.Name) ($($dev.VidPid))"
-        }
-    }
-    if ($failedList.Count -gt 0) {
-        Write-Host "Не удалось отключить:" -ForegroundColor Red
-        foreach ($dev in $failedList) {
-            Write-Host "  * [$($dev.BusId)] $($dev.Name)"
-        }
-    }
-    Write-Host "----------------------`n" -ForegroundColor Cyan
-}
-
-function Invoke-BindDevices {
-    param([array]$DevicesToBind)
-
-    Write-Host ""
-    $successList = @()
-    $failedList  = @()
-
-    foreach ($dev in $DevicesToBind) {
-        Write-Host "Подключение [$($dev.BusId)] $($dev.Name)..." -NoNewline
-        $cmdOut = usbipd bind --busid $dev.BusId 2>&1
-        Start-Sleep -Milliseconds 400
-        $newState = (Get-UsbipdDevices | Where-Object { $_.BusId -eq $dev.BusId }).State
-
-        if ($newState -eq "Shared" -or $newState -like "Attached*") {
-            Write-Host " OK ($newState)" -ForegroundColor Green
-            $successList += [PSCustomObject]@{ Device = $dev; State = $newState }
-        }
-        else {
-            Write-Host " ОШИБКА (статус: $newState)" -ForegroundColor Red
-            if ($cmdOut) { Write-Host "   Детали: $cmdOut" -ForegroundColor DarkRed }
-            $failedList += $dev
-        }
-    }
-
-    Write-Host "`n--- Итог операции ---" -ForegroundColor Cyan
-    if ($successList.Count -gt 0) {
-        Write-Host "Подключены устройства:" -ForegroundColor Green
-        foreach ($item in $successList) {
-            Write-Host "  * [$($item.Device.BusId)] $($item.Device.Name) ($($item.Device.VidPid)) -> $($item.State)"
-        }
-    }
-    if ($failedList.Count -gt 0) {
-        Write-Host "Не удалось подключить:" -ForegroundColor Red
-        foreach ($dev in $failedList) {
-            Write-Host "  * [$($dev.BusId)] $($dev.Name)"
-        }
-    }
-    Write-Host "----------------------`n" -ForegroundColor Cyan
-}
-
-# Основной цикл программы
-while ($true) {
-    $allDevices = @(Get-UsbipdDevices)
-
-    Write-Host "=== Текущий список USB-устройств ===" -ForegroundColor Cyan
-    if ($allDevices.Count -eq 0) {
-        Write-Host "  USB-устройства не обнаружены." -ForegroundColor Yellow
-    }
-    else {
-        foreach ($dev in $allDevices) {
-            if ($dev.State -ne "Not shared") {
-                Write-Host ("  [ПОДКЛЮЧЕНО]    [{0}] {1} ({2}) - {3}" -f $dev.BusId, $dev.Name, $dev.VidPid, $dev.State) -ForegroundColor Green
-            }
-            else {
-                Write-Host ("  [Не подключено] [{0}] {1} ({2})" -f $dev.BusId, $dev.Name, $dev.VidPid) -ForegroundColor Gray
+            if ($inConnected -and $line -match '^\s*(\d+-\d+(?:\.\d+)*)\s+([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s+(.+?)\s+(Not shared|Shared|Attached)\s*$') {
+                $devices += [PSCustomObject]@{
+                    Index  = $devices.Count + 1
+                    BusId  = $matches[1]
+                    VidPid = $matches[2]
+                    Name   = $matches[3].Trim()
+                    State  = $matches[4]
+                }
             }
         }
+        return ,$devices
     }
 
-    $activeDevices   = @($allDevices | Where-Object { $_.State -ne "Not shared" })
-    $unsharedDevices = @($allDevices | Where-Object { $_.State -eq "Not shared" })
-
-    # Динамическое формирование пунктов меню
-    $menuItems = @()
-    if ($activeDevices.Count -gt 0) {
-        $menuItems += [PSCustomObject]@{ Id = "unbind_all"; Label = "Отключить все устройства ($($activeDevices.Count) шт.)" }
-        $menuItems += [PSCustomObject]@{ Id = "unbind";     Label = "Отключить" }
-    }
-    if ($unsharedDevices.Count -gt 0) {
-        $menuItems += [PSCustomObject]@{ Id = "bind";       Label = "Подключить" }
-    }
-    $menuItems += [PSCustomObject]@{ Id = "exit"; Label = "Выход" }
-
-    Write-Host "`nВыберите действие:" -ForegroundColor Cyan
-    for ($i = 0; $i -lt $menuItems.Count; $i++) {
-        Write-Host ("  {0}. {1}" -f ($i + 1), $menuItems[$i].Label)
+    function Show-Header {
+        Clear-Host
+        Write-Host "╭──────────────────────────────────────────────────────────────────────────────────────╮" -ForegroundColor DarkCyan
+        Write-Host "│  " -ForegroundColor DarkCyan -NoNewline
+        Write-Host "USBIPD MANAGER" -ForegroundColor Cyan -NoNewline
+        Write-Host "  •  Управление разрешением проброса USB (bind / unbind)              " -ForegroundColor White -NoNewline
+        Write-Host "│" -ForegroundColor DarkCyan
+        Write-Host "╰──────────────────────────────────────────────────────────────────────────────────────╯" -ForegroundColor DarkCyan
+        Write-Host ""
     }
 
-    Write-Host ""
-    $choiceRaw = (Read-Host "Введите номер действия").Trim()
+    function Show-DevicesTable {
+        param([array]$Devices)
 
-    if ($choiceRaw -notmatch '^\d+$') {
-        Write-Host "[Предупреждение] Введите число от 1 до $($menuItems.Count).`n" -ForegroundColor Yellow
-        continue
-    }
+        Write-Host "╭─────┬──────────┬───────────┬──────────────┬──────────────────────────────────────────╮" -ForegroundColor DarkGray
+        Write-Host "│  #  │ BUSID    │ VID:PID   │ СТАТУС       │ УСТРОЙСТВО                               │" -ForegroundColor Gray
+        Write-Host "├─────┼──────────┼───────────┼──────────────┼──────────────────────────────────────────┤" -ForegroundColor DarkGray
 
-    $choiceIdx = [int]$choiceRaw - 1
-    if ($choiceIdx -lt 0 -or $choiceIdx -ge $menuItems.Count) {
-        Write-Host "[Предупреждение] Пункт '$choiceRaw' отсутствует в меню.`n" -ForegroundColor Yellow
-        continue
-    }
+        if ($Devices.Count -eq 0) {
+            Write-Host "│" -ForegroundColor DarkGray -NoNewline
+            Write-Host "  Подключенные USB-устройства не найдены                                              " -ForegroundColor Yellow -NoNewline
+            Write-Host "│" -ForegroundColor DarkGray
+        } else {
+            foreach ($dev in $Devices) {
+                $idxStr = $dev.Index.ToString().PadLeft(2)
+                $busStr = $dev.BusId.PadRight(8)
+                $vidStr = $dev.VidPid.PadRight(9)
+                $nameStr = if ($dev.Name.Length -gt 40) { $dev.Name.Substring(0, 37) + "..." } else { $dev.Name.PadRight(40) }
 
-    $selectedAction = $menuItems[$choiceIdx].Id
+                Write-Host "│ " -ForegroundColor DarkGray -NoNewline
+                Write-Host "$idxStr  " -ForegroundColor White -NoNewline
+                Write-Host "│ " -ForegroundColor DarkGray -NoNewline
+                Write-Host "$busStr " -ForegroundColor White -NoNewline
+                Write-Host "│ " -ForegroundColor DarkGray -NoNewline
+                Write-Host "$vidStr " -ForegroundColor DarkGray -NoNewline
+                Write-Host "│ " -ForegroundColor DarkGray -NoNewline
 
-    switch ($selectedAction) {
-        "unbind_all" {
-            Invoke-UnbindDevices -DevicesToUnbind $activeDevices
-        }
+                switch ($dev.State) {
+                    "Attached"   { Write-Host "● Attached   " -ForegroundColor Green -NoNewline }
+                    "Shared"     { Write-Host "◐ Shared     " -ForegroundColor Cyan -NoNewline }
+                    "Not shared" { Write-Host "○ Not shared " -ForegroundColor DarkGray -NoNewline }
+                }
 
-        "unbind" {
-            Write-Host "`nПодключенные устройства:" -ForegroundColor Cyan
-            $toUnbind = @(Select-DevicesFromList -DeviceList $activeDevices -PromptText "Введите номера для отключения (через пробел или запятую, например: 1 2)")
-            if ($toUnbind.Count -eq 0) {
-                Write-Host "Ничего не выбрано.`n" -ForegroundColor Yellow
-            }
-            else {
-                Invoke-UnbindDevices -DevicesToUnbind $toUnbind
+                Write-Host "│ " -ForegroundColor DarkGray -NoNewline
+                if ($dev.State -eq "Attached") {
+                    Write-Host "$nameStr " -ForegroundColor Green -NoNewline
+                } elseif ($dev.State -eq "Shared") {
+                    Write-Host "$nameStr " -ForegroundColor Cyan -NoNewline
+                } else {
+                    Write-Host "$nameStr " -ForegroundColor White -NoNewline
+                }
+                Write-Host "│" -ForegroundColor DarkGray
             }
         }
 
-        "bind" {
-            Write-Host "`nДоступные для подключения устройства:" -ForegroundColor Cyan
-            $toBind = @(Select-DevicesFromList -DeviceList $unsharedDevices -PromptText "Введите номера для подключения (через пробел или запятую, например: 1 3)")
-            if ($toBind.Count -eq 0) {
-                Write-Host "Ничего не выбрано.`n" -ForegroundColor Yellow
-            }
-            else {
-                Invoke-BindDevices -DevicesToBind $toBind
-            }
-        }
+        Write-Host "╰─────┴──────────┴───────────┴──────────────┴──────────────────────────────────────────╯" -ForegroundColor DarkGray
+        Write-Host ""
+    }
 
-        "exit" {
-            exit 0
+    function Show-Menu {
+        Write-Host "╭──────────────────────────────────────────────────────────────────────────────────────╮" -ForegroundColor DarkGray
+        Write-Host "│  " -ForegroundColor DarkGray -NoNewline
+        Write-Host "[1]" -ForegroundColor Cyan -NoNewline
+        Write-Host " Разрешить проброс устройства (bind)                                               " -ForegroundColor White -NoNewline
+        Write-Host "│" -ForegroundColor DarkGray
+
+        Write-Host "│  " -ForegroundColor DarkGray -NoNewline
+        Write-Host "[2]" -ForegroundColor Cyan -NoNewline
+        Write-Host " Запретить проброс устройства (unbind)                                             " -ForegroundColor White -NoNewline
+        Write-Host "│" -ForegroundColor DarkGray
+
+        Write-Host "│  " -ForegroundColor DarkGray -NoNewline
+        Write-Host "[3]" -ForegroundColor Yellow -NoNewline
+        Write-Host " Обновить состояние                                                                " -ForegroundColor White -NoNewline
+        Write-Host "│" -ForegroundColor DarkGray
+
+        Write-Host "│  " -ForegroundColor DarkGray -NoNewline
+        Write-Host "[0]" -ForegroundColor DarkGray -NoNewline
+        Write-Host " Выход                                                                             " -ForegroundColor Gray -NoNewline
+        Write-Host "│" -ForegroundColor DarkGray
+        Write-Host "╰──────────────────────────────────────────────────────────────────────────────────────╯" -ForegroundColor DarkGray
+        Write-Host ""
+    }
+
+    while ($true) {
+        $devices = Get-ConnectedUsbDevices
+        Show-Header
+        Show-DevicesTable -Devices $devices
+        Show-Menu
+
+        $action = Read-Host "Выберите действие"
+
+        switch ($action.Trim()) {
+            "1" {
+                if ($devices.Count -eq 0) { continue }
+                Write-Host ""
+                Write-Host "Введите номер устройства (1-$($devices.Count)), " -NoNewline
+                Write-Host "[A]" -ForegroundColor Cyan -NoNewline
+                Write-Host " — разрешить все свободные, " -NoNewline
+                Write-Host "[0]" -ForegroundColor DarkGray -NoNewline
+                Write-Host " — назад"
+                $choice = (Read-Host "Выбор").Trim()
+
+                if ($choice -eq "0" -or [string]::IsNullOrWhiteSpace($choice)) { continue }
+
+                if ($choice -ieq "A") {
+                    $targets = $devices | Where-Object { $_.State -eq "Not shared" }
+                    if (-not $targets) {
+                        Write-Host "[!] Нет свободных устройств для разрешения проброса." -ForegroundColor Yellow
+                    } else {
+                        foreach ($t in $targets) {
+                            Write-Host "[*] Разрешение проброса $($t.BusId) ($($t.Name))..." -ForegroundColor Cyan
+                            usbipd bind --busid $t.BusId
+                        }
+                    }
+                    Start-Sleep -Milliseconds 1300
+                } elseif ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $devices.Count) {
+                    $target = $devices[[int]$choice - 1]
+                    Write-Host "[*] Разрешение проброса $($target.BusId) ($($target.Name))..." -ForegroundColor Cyan
+                    usbipd bind --busid $target.BusId
+                    Start-Sleep -Milliseconds 1300
+                }
+            }
+            "2" {
+                if ($devices.Count -eq 0) { continue }
+                Write-Host ""
+                Write-Host "Введите номер устройства (1-$($devices.Count)), " -NoNewline
+                Write-Host "[A]" -ForegroundColor Cyan -NoNewline
+                Write-Host " — запретить все активные, " -NoNewline
+                Write-Host "[0]" -ForegroundColor DarkGray -NoNewline
+                Write-Host " — назад"
+                $choice = (Read-Host "Выбор").Trim()
+
+                if ($choice -eq "0" -or [string]::IsNullOrWhiteSpace($choice)) { continue }
+
+                if ($choice -ieq "A") {
+                    $targets = $devices | Where-Object { $_.State -ne "Not shared" }
+                    if (-not $targets) {
+                        Write-Host "[!] Нет устройств с активным разрешением проброса." -ForegroundColor Yellow
+                    } else {
+                        foreach ($t in $targets) {
+                            Write-Host "[*] Запрет проброса $($t.BusId) ($($t.Name))..." -ForegroundColor Yellow
+                            usbipd unbind --busid $t.BusId
+                        }
+                    }
+                    Start-Sleep -Milliseconds 1300
+                } elseif ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $devices.Count) {
+                    $target = $devices[[int]$choice - 1]
+                    Write-Host "[*] Запрет проброса $($target.BusId) ($($target.Name))..." -ForegroundColor Yellow
+                    usbipd unbind --busid $target.BusId
+                    Start-Sleep -Milliseconds 1300
+                }
+            }
+            "3" {
+                continue
+            }
+            "0" {
+                exit 0
+            }
         }
     }
+} catch {
+    Write-Host "`n[ОШИБКА] $($_.Exception.Message)" -ForegroundColor Red
+    Read-Host "Нажмите Enter для выхода"
+    exit 1
 }
