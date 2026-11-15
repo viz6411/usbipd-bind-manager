@@ -27,7 +27,7 @@ if not defined WT_SESSION (
     )
 )
 
-:: Запуск интерактивного интерфейса на PowerShell (UTF-8 + цвета + рамки)
+:: Запуск интерактивного интерфейса на PowerShell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$raw = Get-Content -LiteralPath '%~f0' -Raw -Encoding UTF8; $parts = [regex]::Split($raw, '(?m)^#__PS_BLOCK__\r?$'); Invoke-Expression $parts[1]"
 if %errorlevel% neq 0 pause
 exit /b
@@ -66,6 +66,7 @@ try {
 
     function Show-Header {
         Clear-Host
+        $title = "USBIPD MANAGER  •  Управление разрешением проброса USB (bind / unbind)"
         Write-Host "╭──────────────────────────────────────────────────────────────────────────────────────╮" -ForegroundColor DarkCyan
         Write-Host "│  " -ForegroundColor DarkCyan -NoNewline
         Write-Host "USBIPD MANAGER" -ForegroundColor Cyan -NoNewline
@@ -88,9 +89,9 @@ try {
             Write-Host "│" -ForegroundColor DarkGray
         } else {
             foreach ($dev in $Devices) {
-                $idxStr = $dev.Index.ToString().PadLeft(2)
-                $busStr = $dev.BusId.PadRight(8)
-                $vidStr = $dev.VidPid.PadRight(9)
+                $idxStr  = $dev.Index.ToString().PadLeft(2)
+                $busStr  = $dev.BusId.PadRight(8)
+                $vidStr  = $dev.VidPid.PadRight(9)
                 $nameStr = if ($dev.Name.Length -gt 40) { $dev.Name.Substring(0, 37) + "..." } else { $dev.Name.PadRight(40) }
 
                 Write-Host "│ " -ForegroundColor DarkGray -NoNewline
@@ -123,104 +124,110 @@ try {
         Write-Host ""
     }
 
+    function Build-Menu {
+        param(
+            [array]$Devices,
+            [array]$BoundDevices,
+            [array]$UnboundDevices
+        )
+
+        $items = @()
+
+        if ($Devices.Count -eq 0) {
+            $items += [PSCustomObject]@{ Key = "1"; Label = "Обновить состояние"; Action = "REFRESH"; Color = "Yellow" }
+            $items += [PSCustomObject]@{ Key = "0"; Label = "Выход"; Action = "EXIT"; Color = "DarkGray" }
+            return ,$items
+        }
+
+        if ($BoundDevices.Count -eq 0) {
+            # Ни одно устройство не забинжено
+            $items += [PSCustomObject]@{ Key = "1"; Label = "Разрешить проброс (bind)"; Action = "BIND"; Color = "Cyan" }
+            $items += [PSCustomObject]@{ Key = "2"; Label = "Обновить состояние"; Action = "REFRESH"; Color = "Yellow" }
+            $items += [PSCustomObject]@{ Key = "0"; Label = "Выход"; Action = "EXIT"; Color = "DarkGray" }
+        } elseif ($UnboundDevices.Count -gt 0) {
+            # Хотя бы одно устройство забинжено, но не все
+            $items += [PSCustomObject]@{ Key = "1"; Label = "Запретить проброс для всех (unbind all)"; Action = "UNBIND_ALL"; Color = "Cyan" }
+            $items += [PSCustomObject]@{ Key = "2"; Label = "Запретить проброс (unbind)"; Action = "UNBIND"; Color = "Cyan" }
+            $items += [PSCustomObject]@{ Key = "3"; Label = "Разрешить проброс (bind)"; Action = "BIND"; Color = "Cyan" }
+            $items += [PSCustomObject]@{ Key = "4"; Label = "Обновить состояние"; Action = "REFRESH"; Color = "Yellow" }
+            $items += [PSCustomObject]@{ Key = "0"; Label = "Выход"; Action = "EXIT"; Color = "DarkGray" }
+        } else {
+            # Все устройства забинжены
+            $items += [PSCustomObject]@{ Key = "1"; Label = "Запретить проброс для всех (unbind all)"; Action = "UNBIND_ALL"; Color = "Cyan" }
+            $items += [PSCustomObject]@{ Key = "2"; Label = "Запретить проброс (unbind)"; Action = "UNBIND"; Color = "Cyan" }
+            $items += [PSCustomObject]@{ Key = "3"; Label = "Обновить состояние"; Action = "REFRESH"; Color = "Yellow" }
+            $items += [PSCustomObject]@{ Key = "0"; Label = "Выход"; Action = "EXIT"; Color = "DarkGray" }
+        }
+
+        return ,$items
+    }
+
     function Show-Menu {
+        param([array]$MenuItems)
+
         Write-Host "╭──────────────────────────────────────────────────────────────────────────────────────╮" -ForegroundColor DarkGray
-        Write-Host "│  " -ForegroundColor DarkGray -NoNewline
-        Write-Host "[1]" -ForegroundColor Cyan -NoNewline
-        Write-Host " Разрешить проброс устройства (bind)                                               " -ForegroundColor White -NoNewline
-        Write-Host "│" -ForegroundColor DarkGray
+        foreach ($item in $MenuItems) {
+            $paddedLabel = $item.Label.PadRight(80)
+            $textColor = if ($item.Action -eq "EXIT") { "Gray" } else { "White" }
 
-        Write-Host "│  " -ForegroundColor DarkGray -NoNewline
-        Write-Host "[2]" -ForegroundColor Cyan -NoNewline
-        Write-Host " Запретить проброс устройства (unbind)                                             " -ForegroundColor White -NoNewline
-        Write-Host "│" -ForegroundColor DarkGray
-
-        Write-Host "│  " -ForegroundColor DarkGray -NoNewline
-        Write-Host "[3]" -ForegroundColor Yellow -NoNewline
-        Write-Host " Обновить состояние                                                                " -ForegroundColor White -NoNewline
-        Write-Host "│" -ForegroundColor DarkGray
-
-        Write-Host "│  " -ForegroundColor DarkGray -NoNewline
-        Write-Host "[0]" -ForegroundColor DarkGray -NoNewline
-        Write-Host " Выход                                                                             " -ForegroundColor Gray -NoNewline
-        Write-Host "│" -ForegroundColor DarkGray
+            Write-Host "│  " -ForegroundColor DarkGray -NoNewline
+            Write-Host "$($item.Key)." -ForegroundColor $item.Color -NoNewline
+            Write-Host " $paddedLabel" -ForegroundColor $textColor -NoNewline
+            Write-Host " │" -ForegroundColor DarkGray
+        }
         Write-Host "╰──────────────────────────────────────────────────────────────────────────────────────╯" -ForegroundColor DarkGray
         Write-Host ""
     }
 
     while ($true) {
-        $devices = Get-ConnectedUsbDevices
+        $devices        = Get-ConnectedUsbDevices
+        $boundDevices   = @($devices | Where-Object { $_.State -ne "Not shared" })
+        $unboundDevices = @($devices | Where-Object { $_.State -eq "Not shared" })
+
         Show-Header
         Show-DevicesTable -Devices $devices
-        Show-Menu
 
-        $action = Read-Host "Выберите действие"
+        $menuItems = Build-Menu -Devices $devices -BoundDevices $boundDevices -UnboundDevices $unboundDevices
+        Show-Menu -MenuItems $menuItems
 
-        switch ($action.Trim()) {
-            "1" {
-                if ($devices.Count -eq 0) { continue }
+        $choice = (Read-Host "Выберите действие").Trim()
+        $selected = $menuItems | Where-Object { $_.Key -eq $choice } | Select-Object -First 1
+
+        if (-not $selected) { continue }
+
+        switch ($selected.Action) {
+            "BIND" {
                 Write-Host ""
-                Write-Host "Введите номер устройства (1-$($devices.Count)), " -NoNewline
-                Write-Host "[A]" -ForegroundColor Cyan -NoNewline
-                Write-Host " — разрешить все свободные, " -NoNewline
-                Write-Host "[0]" -ForegroundColor DarkGray -NoNewline
-                Write-Host " — назад"
-                $choice = (Read-Host "Выбор").Trim()
-
-                if ($choice -eq "0" -or [string]::IsNullOrWhiteSpace($choice)) { continue }
-
-                if ($choice -ieq "A") {
-                    $targets = $devices | Where-Object { $_.State -eq "Not shared" }
-                    if (-not $targets) {
-                        Write-Host "[!] Нет свободных устройств для разрешения проброса." -ForegroundColor Yellow
-                    } else {
-                        foreach ($t in $targets) {
-                            Write-Host "[*] Разрешение проброса $($t.BusId) ($($t.Name))..." -ForegroundColor Cyan
-                            usbipd bind --busid $t.BusId
-                        }
-                    }
-                    Start-Sleep -Milliseconds 1300
-                } elseif ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $devices.Count) {
-                    $target = $devices[[int]$choice - 1]
-                    Write-Host "[*] Разрешение проброса $($target.BusId) ($($target.Name))..." -ForegroundColor Cyan
+                $num = (Read-Host "Введите номер устройства (1-$($devices.Count), 0 — отмена)").Trim()
+                if ($num -match '^\d+$' -and [int]$num -ge 1 -and [int]$num -le $devices.Count) {
+                    $target = $devices[[int]$num - 1]
+                    Write-Host "[*] Выполнение: usbipd bind --busid $($target.BusId) ($($target.Name))..." -ForegroundColor Cyan
                     usbipd bind --busid $target.BusId
-                    Start-Sleep -Milliseconds 1300
+                    Start-Sleep -Milliseconds 1200
                 }
             }
-            "2" {
-                if ($devices.Count -eq 0) { continue }
+            "UNBIND" {
                 Write-Host ""
-                Write-Host "Введите номер устройства (1-$($devices.Count)), " -NoNewline
-                Write-Host "[A]" -ForegroundColor Cyan -NoNewline
-                Write-Host " — запретить все активные, " -NoNewline
-                Write-Host "[0]" -ForegroundColor DarkGray -NoNewline
-                Write-Host " — назад"
-                $choice = (Read-Host "Выбор").Trim()
-
-                if ($choice -eq "0" -or [string]::IsNullOrWhiteSpace($choice)) { continue }
-
-                if ($choice -ieq "A") {
-                    $targets = $devices | Where-Object { $_.State -ne "Not shared" }
-                    if (-not $targets) {
-                        Write-Host "[!] Нет устройств с активным разрешением проброса." -ForegroundColor Yellow
-                    } else {
-                        foreach ($t in $targets) {
-                            Write-Host "[*] Запрет проброса $($t.BusId) ($($t.Name))..." -ForegroundColor Yellow
-                            usbipd unbind --busid $t.BusId
-                        }
-                    }
-                    Start-Sleep -Milliseconds 1300
-                } elseif ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $devices.Count) {
-                    $target = $devices[[int]$choice - 1]
-                    Write-Host "[*] Запрет проброса $($target.BusId) ($($target.Name))..." -ForegroundColor Yellow
+                $num = (Read-Host "Введите номер устройства (1-$($devices.Count), 0 — отмена)").Trim()
+                if ($num -match '^\d+$' -and [int]$num -ge 1 -and [int]$num -le $devices.Count) {
+                    $target = $devices[[int]$num - 1]
+                    Write-Host "[*] Выполнение: usbipd unbind --busid $($target.BusId) ($($target.Name))..." -ForegroundColor Yellow
                     usbipd unbind --busid $target.BusId
-                    Start-Sleep -Milliseconds 1300
+                    Start-Sleep -Milliseconds 1200
                 }
             }
-            "3" {
+            "UNBIND_ALL" {
+                Write-Host ""
+                foreach ($t in $boundDevices) {
+                    Write-Host "[*] Выполнение: usbipd unbind --busid $($t.BusId) ($($t.Name))..." -ForegroundColor Yellow
+                    usbipd unbind --busid $t.BusId
+                }
+                Start-Sleep -Milliseconds 1200
+            }
+            "REFRESH" {
                 continue
             }
-            "0" {
+            "EXIT" {
                 exit 0
             }
         }
